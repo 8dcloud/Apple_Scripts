@@ -1,0 +1,138 @@
+#!/bin/bash
+# Quick Action: YT: PNG→JPG ≤2MB (HQ, robust sRGB handling)
+# Prefers ImageMagick; falls back to sips with ICC detection.
+# Output: <name>-yt.jpg next to original.
+
+set -euo pipefail
+
+MAX_BYTES=$((2*1024*1024))   # 2 MB
+TARGET_W=1920
+TARGET_H=1080
+
+# Detect ImageMagick
+have_magick=0
+if command -v magick >/dev/null 2>&1; then
+  have_magick=1
+fi
+
+# Detect an sRGB ICC profile for sips (-m requires a file path)
+SRGB_ICC=""
+CANDIDATES=(
+  "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
+  "/System/Library/ColorSync/Profiles/sRGB IEC61966-2.1.icc"
+  "/Library/ColorSync/Profiles/sRGB Profile.icc"
+  "/Library/ColorSync/Profiles/sRGB IEC61966-2.1.icc"
+)
+for p in "${CANDIDATES[@]}"; do
+  if [[ -f "$p" ]]; then
+    SRGB_ICC="$p"
+    break
+  fi
+done
+
+for inpath in "$@"; do
+  dir="$(dirname "$inpath")"
+  base="$(basename "$inpath")"
+  stem="${base%.*}"
+  out="${dir}/${stem}-yt.jpg"
+
+  if (( have_magick == 1 )); then
+    # ---------------- ImageMagick path ----------------
+    tmp="$(mktemp -t ytimXXXXXX).jpg"
+    work="$(mktemp -t ytimwXXXXXX).jpg"
+
+    # Normalize to sRGB, fit (no upscaling), then pad to 1920x1080 for consistent YT framing
+    magick "$inpath" \
+      -colorspace sRGB -strip \
+      -resize "${TARGET_W}x${TARGET_H}>" \
+      -background "#0a0a0a" -gravity center -extent "${TARGET_W}x${TARGET_H}" \
+      "$work"
+
+    q=92       # start quality
+    min_q=60   # floor
+    step=4
+
+    magick "$work" -sampling-factor 4:2:0 -interlace JPEG -quality $q -strip "$tmp"
+    size=$(stat -f%z "$tmp" 2>/dev/null || stat -c%s "$tmp")
+
+    while (( size > MAX_BYTES && q > min_q )); do
+      q=$((q - step))
+      magick "$work" -sampling-factor 4:2:0 -interlace JPEG -quality $q -strip "$tmp"
+      size=$(stat -f%z "$tmp" 2>/dev/null || stat -c%s "$tmp")
+    done
+
+    # Gentle downscale if still too big (2% steps, 100%→80%)
+    scale=100
+    while (( size > MAX_BYTES && scale > 80 )); do
+      scale=$((scale - 2))
+      magick "$work" -resize "${scale}%x${scale}%" \
+        -background "#0a0a0a" -gravity center -extent "${TARGET_W}x${TARGET_H}" \
+        -sampling-factor 4:2:0 -interlace JPEG -quality $q -strip "$tmp"
+      size=$(stat -f%z "$tmp" 2>/dev/null || stat -c%s "$tmp")
+    done
+
+    mv -f "$tmp" "$out"
+    rm -f "$work" || true
+    echo "Saved (magick): $out (quality=${q}, size=${size} bytes)"
+
+  else
+    # ---------------- sips fallback ----------------
+    tmp="$(mktemp -t ytjpgXXXXXX).jpg"
+
+    # Read dims
+    w=$(sips -g pixelWidth "$inpath" 2>/dev/null | awk '/pixelWidth/ {print $2}' || echo "")
+    h=$(sips -g pixelHeight "$inpath" 2>/dev/null | awk '/pixelHeight/ {print $2}' || echo "")
+
+    resize_args=()
+    if [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]]; then
+      # Reduce only if exceeding target (no upscaling)
+      if (( w > TARGET_W )); then
+        resize_args+=(--resampleWidth $TARGET_W)
+      fi
+      if (( h > TARGET_H )); then
+        resize_args+=(--resampleHeight $TARGET_H)
+      fi
+    fi
+
+    q=92
+    min_q=60
+    step=6
+
+    # Build sips args; use -m <icc> only if found to avoid profile errors
+    sips_args=( -s format jpeg -s formatOptions "$q" )
+    if [[ -n "$SRGB_ICC" ]]; then
+      sips_args+=( -m "$SRGB_ICC" )
+    fi
+
+    sips "${sips_args[@]}" \
+         "${resize_args[@]}" \
+         "$inpath" --out "$tmp" >/dev/null
+
+    size=$(stat -f%z "$tmp" 2>/dev/null || stat -c%s "$tmp")
+
+    # Reduce quality until <= 2MB or min_q
+    while (( size > MAX_BYTES && q > min_q )); do
+      q=$((q - step))
+      sips -s format jpeg -s formatOptions "$q" ${SRGB_ICC:+-m "$SRGB_ICC"} \
+           "$tmp" --out "$tmp" >/dev/null
+      size=$(stat -f%z "$tmp" 2>/dev/null || stat -c%s "$tmp")
+    done
+
+    # Gentle final downscale (10%) if still too big
+    if (( size > MAX_BYTES )); then
+      cw=$(sips -g pixelWidth "$tmp" | awk '/pixelWidth/ {print $2}')
+      if [[ "$cw" =~ ^[0-9]+$ && $cw -gt 0 ]]; then
+        nw=$(( cw * 90 / 100 ))
+        sips -s format jpeg -s formatOptions "$min_q" ${SRGB_ICC:+-m "$SRGB_ICC"} \
+             --resampleWidth "$nw" "$tmp" --out "$tmp" >/dev/null
+        size=$(stat -f%z "$tmp" 2>/dev/null || stat -c%s "$tmp")
+      fi
+      if (( size > MAX_BYTES )); then
+        echo "Warning: '${base}' best-effort at min quality; size=${size} bytes" >&2
+      fi
+    fi
+
+    mv -f "$tmp" "$out"
+    echo "Saved (sips): $out (quality=${q}, size=${size} bytes)"
+  fi
+done
