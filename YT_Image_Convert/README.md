@@ -30,3 +30,47 @@ quickly identify the optimized thumbnail.
 
   ```bash
   brew install imagemagick
+  ```
+
+---
+
+## Installation
+
+1. Open **Automator**.
+2. Create a **New Document** → **Quick Action**.
+3. Configure:
+   - **Workflow receives current:** `image files`  
+   - **in:** `Finder`
+4. Add an action: **Run Shell Script**.
+   - **Shell:** `/bin/bash`  
+   - **Pass input:** `as arguments`
+5. Paste in the contents of `yt_png2jpg.sh` (the script from this repo).
+6. Save as: **YT: PNG→JPG ≤2MB (HQ)**.
+
+The Quick Action will now appear in Finder under:  
+**Right-click → Quick Actions → YT: PNG→JPG ≤2MB (HQ)**.
+
+---
+
+## Usage
+
+1. In Finder, select one or more PNG (or JPG) files.
+2. Right-click → **Quick Actions → YT: PNG→JPG ≤2MB (HQ)**.
+3. The optimized JPGs will be created in the same folder, named:
+   ```
+   mythumbnail.png   →   mythumbnail-yt.jpg
+   ```
+
+---
+
+## Notes
+
+- ImageMagick branch: progressive JPEG, 4:2:0 sampling, iterative quality reduction.
+- sips branch: uses native macOS tools, finds valid sRGB ICC profile if available.
+- Both guarantee the best quality possible at or under 2 MB.
+
+---
+
+## License
+
+MIT License. Use freely for personal or commercial work.
